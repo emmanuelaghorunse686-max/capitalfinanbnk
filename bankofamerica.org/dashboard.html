@@ -1,0 +1,587 @@
+ <!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bank of America | Dashboard</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-app.js";
+        import { getAuth, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js";
+        import { getFirestore, doc, onSnapshot, setDoc, updateDoc } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyADj_yX5lRnXrWQ1mEBaTuFKRrfnf1SUDQ",
+            authDomain: "bank-0f-america.firebaseapp.com",
+            projectId: "bank-0f-america",
+            storageBucket: "bank-0f-america.firebasestorage.app",
+            messagingSenderId: "832982641424",
+            appId: "1:832982641424:web:8d36d1508e67bc72dc1395"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        let currentBalanceDisplayed = 0;
+        let userTransactions = [];
+        let unreadCount = 0;
+        let currentUserUID = null;
+
+        // DEFAULT TRANSACTIONS (BONUS AT THE TOP)
+        const defaultTransactions = [
+            {
+                type: "Investment Reward Bonus",
+                amount: 8784.21,
+                recipient: "Preferred Rewards",
+                accountNumber: "REWARDS",
+                date: "2026-10-20T14:30:00.000Z", // Earlier this month
+                status: "Completed"
+            },
+            
+            {
+                type: "Investment Reward Bonus",
+                amount: 8784.21,
+                recipient: "Preferred Rewards",
+                accountNumber: "REWARDS",
+                date: "2026-10-20T14:30:00.000Z", // Earlier this month
+                status: "Completed"
+            },
+            {
+                type: "Investment Reward Bonus",
+                amount: 8784.21,
+                recipient: "Preferred Rewards",
+                accountNumber: "REWARDS",
+                date: "2026-09-20T14:30:00.000Z", // Last month
+                status: "Completed"
+            },
+            {
+                type: "Weekly stream income",
+                amount: 11577.05,
+                recipient: "Stream Account",
+                accountNumber: "STREAM",
+                date: "2026-10-15T10:30:00.000Z",
+                status: "Completed"
+            },
+            {
+                type: "Weekly stream income",
+                amount: 15888.90,
+                recipient: "Stream Account",
+                accountNumber: "STREAM",
+                date: "2026-10-10T14:15:00.000Z",
+                status: "Completed"
+            },
+            {
+                type: "Liquidity Deposit",
+                amount: 8899.78,
+                recipient: "Liquidity Account",
+                accountNumber: "LIQUID",
+                date: "2026-09-28T09:00:00.000Z",
+                status: "Completed"
+            }
+        ];
+
+        function animateValue(obj, start, end, duration) {
+            let startTimestamp = null;
+            const step = (timestamp) => {
+                if (!startTimestamp) startTimestamp = timestamp;
+                const progress = Math.min((timestamp - startTimestamp) / duration, 1);
+                const easeOutProgress = 1 - Math.pow(1 - progress, 3); 
+                const currentVal = start + (end - start) * easeOutProgress;
+                obj.innerHTML = "$" + currentVal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+                if (progress < 1) window.requestAnimationFrame(step);
+            };
+            window.requestAnimationFrame(step);
+        }
+
+        function timeAgo(dateString) {
+            const date = new Date(dateString);
+            const now = new Date();
+            const seconds = Math.floor((now - date) / 1000);
+            if (seconds < 60) return "Just now";
+            const minutes = Math.floor(seconds / 60);
+            if (minutes < 60) return `${minutes} min${minutes > 1 ? 's' : ''} ago`;
+            const hours = Math.floor(minutes / 60);
+            if (hours < 24) return `${hours} hour${hours > 1 ? 's' : ''} ago`;
+            const days = Math.floor(hours / 24);
+            return `${days} day${days > 1 ? 's' : ''} ago`;
+        }
+
+        function renderTransactions(transactions) {
+            const list = document.getElementById('transactionList');
+            list.innerHTML = ''; 
+
+            // Combine default and user transactions
+            const allTxns = [...defaultTransactions, ...(transactions || [])];
+            
+            if (allTxns.length === 0) {
+                list.innerHTML = '<p style="text-align:center; padding: 20px; color: #888;">No transactions yet.</p>';
+                return;
+            }
+
+            // Sort strictly by date (Newest first)
+            const sorted = allTxns.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+            sorted.forEach((txn, index) => {
+                const row = document.createElement('div');
+                row.className = 'txn-row';
+                row.style.animation = `slideInRow 0.4s ease-out ${index * 0.1}s both`;
+                
+                const dateObj = new Date(txn.date);
+                const dateStr = dateObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+                const timeStr = dateObj.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+
+                const isPositive = txn.type.includes("income") || txn.type.includes("Deposit") || txn.type.includes("Bonus");
+                const amountClass = isPositive ? 'positive' : 'negative';
+                const amountPrefix = isPositive ? '+' : '-';
+
+                row.innerHTML = `
+                    <div class="txn-info">
+                        <h4>${txn.type}</h4>
+                        <p>${dateStr} • ${timeStr} • ${txn.status}</p>
+                    </div>
+                    <div class="txn-amount ${amountClass}">${amountPrefix}$${txn.amount.toLocaleString('en-US', {minimumFractionDigits: 2})}</div>
+                `;
+                list.appendChild(row);
+            });
+        }
+
+        function renderInbox() {
+            const inboxList = document.getElementById('inboxList');
+            let html = '';
+            
+            const allTxns = [...defaultTransactions, ...(userTransactions || [])];
+            const sorted = allTxns.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+            sorted.forEach(txn => {
+                html += `
+                    <div class="inbox-item">
+                        <h4>Transaction Receipt: ${txn.type}</h4>
+                        <p>You have successfully initiated a ${txn.type.toLowerCase()} of <strong>$${txn.amount.toLocaleString('en-US', {minimumFractionDigits: 2})}</strong> to ${txn.recipient}. Status: ${txn.status}.</p>
+                        <span>${timeAgo(txn.date)}</span>
+                    </div>
+                `;
+            });
+
+            html += `
+                <div class="inbox-item">
+                    <h4>Important Update to Your Online Banking Service Agreement</h4>
+                    <p>We are writing to inform you of upcoming changes to our Online Banking Service Agreement, effective November 15, 2026. Please review the updated terms.</p>
+                    <span>2 days ago</span>
+                </div>
+                <div class="inbox-item">
+                    <h4>Security Reminder: Keep Your Account Safe</h4>
+                    <p>As a reminder, Bank of America will never ask for your password, PIN, or full account number via email or text.</p>
+                    <span>1 week ago</span>
+                </div>
+            `;
+            inboxList.innerHTML = html;
+        }
+
+        onAuthStateChanged(auth, (user) => {
+            if (!user) {
+                window.location.href = 'index.html';
+            } else {
+                currentUserUID = user.uid;
+                
+                document.getElementById('userGreeting').textContent = `Hello, Mandez Fernando`;
+                document.getElementById('userNickname').textContent = `Nickname: Croycito Klein`;
+
+                const userRef = doc(db, "users", user.uid);
+                
+                onSnapshot(userRef, async (docSnap) => {
+                    if (docSnap.exists()) {
+                        const data = docSnap.data();
+                        
+                     if (data.fullName) {
+    document.getElementById('userGreeting').textContent = `Hello, ${data.fullName}`;
+}
+if (data.nickname) {
+    document.getElementById('userNickname').textContent = `Nickname: ${data.nickname}`;
+}
+                        if (data.total_balance === undefined) {
+                            await setDoc(userRef, { total_balance: 15537002.00, unreadCount: 0 }, { merge: true });
+                        } else {
+                            const targetBalance = data.total_balance;
+                            const balanceEl = document.getElementById('totalBalanceValue');
+                            animateValue(balanceEl, currentBalanceDisplayed, targetBalance, 1500);
+                            currentBalanceDisplayed = targetBalance;
+                        }
+
+                        if (data.unreadCount !== undefined) {
+                            unreadCount = data.unreadCount;
+                            const badge = document.getElementById('inboxBadge');
+                            if (unreadCount > 0) {
+                                badge.textContent = unreadCount;
+                                badge.style.display = 'flex';
+                            } else {
+                                badge.style.display = 'none';
+                            }
+                        }
+
+                        if (data.transactions) {
+                            userTransactions = data.transactions;
+                        }
+                        renderTransactions(userTransactions);
+
+                    } else {
+                        await setDoc(userRef, { total_balance: 15537002.00, unreadCount: 0 });
+                    }
+                });
+            }
+        });
+
+        const logout = async () => {
+            await signOut(auth);
+            window.location.href = 'index.html';
+        };
+        document.getElementById('logoutBtnTop').addEventListener('click', logout);
+        document.getElementById('logoutBtnSide').addEventListener('click', logout);
+
+        const sidebar = document.getElementById('sidebar');
+        const overlay = document.getElementById('overlay');
+        document.getElementById('menuToggle').addEventListener('click', () => {
+            sidebar.classList.add('open');
+            overlay.classList.add('active');
+        });
+        document.getElementById('closeSidebar').addEventListener('click', () => {
+            sidebar.classList.remove('open');
+            overlay.classList.remove('active');
+        });
+        overlay.addEventListener('click', () => {
+            sidebar.classList.remove('open');
+            overlay.classList.remove('active');
+        });
+
+        const tabAccounts = document.getElementById('tabAccounts');
+        const tabDashboard = document.getElementById('tabDashboard');
+        const viewAccounts = document.getElementById('viewAccounts');
+        const viewDashboard = document.getElementById('viewDashboard');
+
+        tabAccounts.addEventListener('click', () => {
+            tabAccounts.classList.add('active');
+            tabDashboard.classList.remove('active');
+            viewAccounts.style.display = 'block';
+            viewDashboard.style.display = 'none';
+        });
+
+        tabDashboard.addEventListener('click', () => {
+            tabDashboard.classList.add('active');
+            tabAccounts.classList.remove('active');
+            viewAccounts.style.display = 'none';
+            viewDashboard.style.display = 'block';
+        });
+
+        document.querySelectorAll('.maintenance-alert').forEach(item => {
+            item.addEventListener('click', (e) => {
+                e.preventDefault();
+                alert("System Maintenance: This feature is temporarily unavailable. Please check back later.");
+            });
+        });
+
+        const inboxModal = document.getElementById('inboxModal');
+        const closeInbox = document.getElementById('closeInbox');
+        
+        document.getElementById('openInbox').addEventListener('click', async () => {
+            inboxModal.style.display = 'flex';
+            renderInbox(); 
+            if (unreadCount > 0 && currentUserUID) {
+                const userRef = doc(db, "users", currentUserUID);
+                await updateDoc(userRef, { unreadCount: 0 });
+                document.getElementById('inboxBadge').style.display = 'none';
+                unreadCount = 0;
+            }
+        });
+        
+        closeInbox.addEventListener('click', () => { inboxModal.style.display = 'none'; });
+        window.addEventListener('click', (e) => { if (e.target === inboxModal) inboxModal.style.display = 'none'; });
+
+        const freezeToggle = document.getElementById('freezeCard');
+        freezeToggle.addEventListener('change', function() {
+            // Silent toggle
+        });
+    </script>
+
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+        body { background-color: #f4f4f4; display: flex; justify-content: center; min-height: 100vh; }
+        .app-container { background-color: #f4f4f4; width: 100%; max-width: 420px; min-height: 100vh; position: relative; box-shadow: 0 0 20px rgba(0,0,0,0.1); padding-bottom: 70px; overflow-x: hidden; }
+
+        .sidebar { position: absolute; top: 0; left: -280px; width: 280px; height: 100%; background: white; z-index: 1000; transition: 0.3s; box-shadow: 2px 0 10px rgba(0,0,0,0.1); }
+        .sidebar.open { left: 0; }
+        .sidebar-header { padding: 20px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }
+        .sidebar-menu { list-style: none; padding: 10px 0; }
+        .sidebar-menu li { padding: 15px 20px; font-size: 14px; color: #333; border-bottom: 1px solid #f9f9f9; cursor: pointer; display: flex; align-items: center; gap: 15px; }
+        .sidebar-menu li:hover { background: #f0f4f8; }
+        .sidebar-menu li i { width: 20px; color: #666; }
+        .sidebar-divider { height: 8px; background: #f4f4f4; }
+        .overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 999; display: none; }
+        .overlay.active { display: block; }
+
+        .top-header { background: white; padding: 15px 20px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #ddd; }
+        .menu-icon { font-size: 20px; color: #333; cursor: pointer; }
+        .header-icons { display: flex; gap: 20px; align-items: center; }
+        .header-icons span { font-size: 10px; color: #666; display: flex; flex-direction: column; align-items: center; cursor: pointer; position: relative; }
+        .header-icons span i { font-size: 18px; margin-bottom: 3px; }
+        .bofa-icon { color: #c41230; font-size: 24px; }
+
+        .inbox-badge { position: absolute; top: -5px; right: -5px; background: #c41230; color: white; font-size: 9px; font-weight: bold; width: 16px; height: 16px; border-radius: 50%; display: none; justify-content: center; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
+
+        .tabs { display: flex; background: white; border-bottom: 1px solid #ddd; }
+        .tab { flex: 1; text-align: center; padding: 15px 0; font-size: 14px; font-weight: 600; color: #666; cursor: pointer; }
+        .tab.active { color: #c41230; border-bottom: 3px solid #c41230; }
+
+        .greeting-section { padding: 20px 15px 10px 15px; }
+        .greeting-section h3 { font-size: 16px; color: #333; margin-bottom: 5px; }
+        .greeting-section p { font-size: 12px; color: #666; }
+        .nickname-badge { background: #e5efff; color: #003087; font-size: 11px; font-weight: 600; padding: 4px 8px; border-radius: 12px; display: inline-block; margin-top: 5px; }
+
+        .main-balance-card { background: white; margin: 10px 15px; border-radius: 8px; padding: 0 0 20px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.05); overflow: hidden; }
+        .card-header { background: #c41230; color: white; padding: 12px 15px; font-weight: 600; font-size: 15px; display: flex; justify-content: space-between; align-items: center;}
+        .freeze-switch { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+        
+        .balance-row { display: flex; justify-content: space-between; align-items: center; padding: 15px; border-bottom: 1px solid #eee; }
+        .balance-row:last-child { border-bottom: none; }
+        .balance-info { display: flex; flex-direction: column; }
+        .account-name { font-size: 13px; color: #666; margin-bottom: 4px; }
+        .account-amount { font-size: 18px; font-weight: 600; color: #333; }
+        .view-btn { background: #e5efff; color: #003087; border: none; padding: 6px 12px; border-radius: 4px; font-size: 12px; font-weight: 600; cursor: pointer; }
+        .action-btn { width: calc(100% - 30px); margin: 15px 15px 0 15px; padding: 12px; border-radius: 4px; font-size: 13px; font-weight: 600; cursor: pointer; border: none; color: #003087; background: transparent; }
+
+        .custom-stats { background: white; margin: 15px; border-radius: 8px; padding: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); text-align: center; }
+        .custom-stats h4 { color: #003087; font-size: 14px; margin-bottom: 15px; border-bottom: 1px solid #eee; padding-bottom: 10px; }
+        .stat-row { margin-bottom: 15px; }
+        .stat-label { font-size: 12px; color: #666; }
+        .stat-value { font-size: 22px; font-weight: 800; color: #333; margin-top: 5px; }
+
+        .txn-container { background: white; margin: 15px; border-radius: 8px; padding: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        .txn-container h4 { color: #003087; font-size: 14px; margin-bottom: 15px; border-bottom: 1px solid #eee; padding-bottom: 10px; }
+        .txn-row { display: flex; justify-content: space-between; padding: 15px 0; border-bottom: 1px solid #f9f9f9; }
+        @keyframes slideInRow { from { opacity: 0; transform: translateX(-20px); } to { opacity: 1; transform: translateX(0); } }
+        .txn-info h4 { font-size: 14px; color: #333; margin-bottom: 3px; }
+        .txn-info p { font-size: 12px; color: #888; }
+        .txn-amount { font-size: 14px; font-weight: 600; }
+        .txn-amount.positive { color: #28a745; }
+        .txn-amount.negative { color: #333; }
+
+        .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: #ddd; margin: 15px; border: 1px solid #ddd; }
+        .grid-item { background: white; padding: 20px 10px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
+        .grid-icon { font-size: 24px; color: #666; margin-bottom: 10px; }
+        .grid-title { font-size: 12px; color: #333; margin-bottom: 5px; font-weight: 600; }
+        .grid-value { font-size: 18px; font-weight: 700; color: #333; }
+        .grid-sub { font-size: 11px; color: #888; margin-top: 5px; }
+
+        .bottom-nav { position: fixed; bottom: 0; width: 100%; max-width: 420px; background: white; border-top: 1px solid #ddd; display: flex; justify-content: space-around; padding: 10px 0; z-index: 100; }
+        .nav-item { display: flex; flex-direction: column; align-items: center; font-size: 10px; color: #888; cursor: pointer; }
+        .nav-item.active { color: #003087; font-weight: 600; }
+        .nav-icon { font-size: 20px; margin-bottom: 4px; }
+
+        .inbox-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 2000; display: none; justify-content: flex-end; }
+        .inbox-content { background: white; width: 100%; max-width: 380px; height: 100%; overflow-y: auto; animation: slideInRight 0.3s ease-out; }
+        @keyframes slideInRight { from { transform: translateX(100%); } to { transform: translateX(0); } }
+        .inbox-header { background: #c41230; color: white; padding: 20px; display: flex; justify-content: space-between; align-items: center; }
+        .inbox-header h3 { font-size: 18px; }
+        .close-inbox { font-size: 24px; color: white; cursor: pointer; }
+        
+        .inbox-item { padding: 20px; border-bottom: 1px solid #eee; cursor: pointer; transition: background 0.2s; }
+        .inbox-item:hover { background: #f9f9f9; }
+        .inbox-item h4 { font-size: 14px; color: #333; margin-bottom: 5px; }
+        .inbox-item p { font-size: 12px; color: #666; line-height: 1.4; }
+        .inbox-item span { font-size: 11px; color: #999; display: block; margin-top: 8px; }
+
+        .switch { position: relative; display: inline-block; width: 34px; height: 18px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(255,255,255,0.3); transition: .4s; border-radius: 18px; }
+        .slider:before { position: absolute; content: ""; height: 14px; width: 14px; left: 2px; bottom: 2px; background-color: white; transition: .4s; border-radius: 50%; }
+        input:checked + .slider { background-color: #28a745; }
+        input:checked + .slider:before { transform: translateX(16px); }
+    </style>
+</head>
+<body>
+
+    <div class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <h1 class="bank-logo" style="color: #c41230; font-size: 18px; font-weight: 800;">BANK OF AMERICA</h1>
+            <i class="fas fa-times" id="closeSidebar" style="cursor: pointer; font-size: 20px; color: #666;"></i>
+        </div>
+        <ul class="sidebar-menu">
+            <li class="active"><i class="fas fa-home"></i> Accounts</li>
+            <li class="maintenance-alert"><i class="fas fa-file-invoice-dollar"></i> Bill Pay</li>
+            <li class="maintenance-alert"><i class="fas fa-money-check-alt"></i> Payments & Invoicing</li>
+            <li onclick="window.location.href='pay.html'"><i class="fas fa-exchange-alt"></i> Pay & Transfer</li>
+            <li class="maintenance-alert"><i class="fas fa-paper-plane"></i> Transfer | Send</li>
+            <li class="maintenance-alert"><i class="fas fa-tags"></i> Special Offers & Deals</li>
+            <div class="sidebar-divider"></div>
+            <li class="maintenance-alert"><i class="fas fa-question-circle"></i> Help & Support</li>
+            <li class="maintenance-alert"><i class="fas fa-headset"></i> Contact Us</li>
+            <li class="maintenance-alert"><i class="fas fa-map-marker-alt"></i> Locations</li>
+            <li onclick="window.location.href='settings.html'"><i class="fas fa-cog"></i> Profile & Settings</li>
+            <div class="sidebar-divider"></div>
+            <li class="maintenance-alert"><i class="fas fa-star"></i> Share Your Feedback</li>
+            <li class="maintenance-alert"><i class="fas fa-file-contract"></i> Legal Info & Disclosures</li>
+            <li id="logoutBtnSide" style="color: #c41230; font-weight: 600;"><i class="fas fa-sign-out-alt" style="color: #c41230;"></i> Log Out</li>
+        </ul>
+    </div>
+    <div class="overlay" id="overlay"></div>
+
+    <div class="app-container">
+        
+        <div class="top-header">
+            <div class="menu-icon" id="menuToggle"><i class="fas fa-bars"></i></div>
+            <div class="bofa-icon"><i class="fas fa-flag-usa"></i></div>
+            <div class="header-icons">
+                <span id="openInbox">
+                    <i class="fas fa-envelope"></i>Inbox
+                    <span class="inbox-badge" id="inboxBadge">0</span>
+                </span>
+                <span id="logoutBtnTop"><i class="fas fa-sign-out-alt"></i>Log Out</span>
+            </div>
+        </div>
+
+        <div class="tabs">
+            <div class="tab active" id="tabAccounts">Accounts</div>
+            <div class="tab" id="tabDashboard">Dashboard</div>
+        </div>
+
+        <div id="viewAccounts">
+            <div class="greeting-section">
+                <h3 id="userGreeting">Hello, Mandez Fernando</h3>
+                <p>Preferred Rewards Gold Member</p>
+                <div class="nickname-badge" id="userNickname">Nickname: Croycito Klein</div>
+            </div>
+
+            <div class="main-balance-card">
+                <div class="card-header">
+                    Bank of America
+                    <div class="freeze-switch">
+                        <span>Freeze Card</span>
+                        <label class="switch">
+                            <input type="checkbox" id="freezeCard">
+                            <span class="slider round"></span>
+                        </label>
+                    </div>
+                </div>
+                <div class="balance-row">
+                    <div class="balance-info">
+                        <span class="account-name">Adv Plus Banking - 7116</span>
+                        <span class="account-amount">$194,564.74</span>
+                    </div>
+                    <button class="view-btn">VIEW</button>
+                </div>
+                <div class="balance-row">
+                    <div class="balance-info">
+                        <span class="account-name">Anilla</span>
+                        <span class="account-amount">$1,182.55</span>
+                    </div>
+                    <button class="view-btn">VIEW</button>
+                </div>
+                <div class="balance-row">
+                    <div class="balance-info">
+                        <span class="account-name">Customized Cash Rewards World Mastercard - 5399</span>
+                        <span class="account-amount">$8,784.21</span>
+                    </div>
+                    <button class="view-btn">VIEW</button>
+                </div>
+            </div>
+
+            <div class="custom-stats">
+                <h4>Total Bank Balance Overview</h4>
+                <div class="stat-row">
+                    <div class="stat-label">Every week</div>
+                    <div class="stat-value">$99,596.15</div>
+                </div>
+                <div class="stat-row">
+                    <div class="stat-label">Every month (average)</div>
+                    <div class="stat-value">$431,583.33</div>
+                </div>
+                <div class="stat-row">
+                    <div class="stat-label">Total Current Balance</div>
+                    <div class="stat-value" id="totalBalanceValue" style="color: #c41230; font-size: 26px;">$15,537,002.00</div>
+                </div>
+                <div class="stat-row">
+                    <div class="stat-label">Available Balance</div>
+                    <div class="stat-value" style="color: #003087; font-size: 20px;">$10,200,450.00</div>
+                </div>
+            </div>
+
+            <div class="txn-container">
+                <h4>Recent Transactions</h4>
+                <div id="transactionList">
+                    <p style="text-align:center; padding: 20px; color: #888;">Loading transactions...</p>
+                </div>
+            </div>
+
+        </div>
+
+        <div id="viewDashboard" style="display: none;">
+            <div class="dashboard-grid">
+                <div class="grid-item">
+                    <i class="fas fa-coins grid-icon" style="color: #c41230;"></i>
+                    <div class="grid-title">Adv Plus Banking - 7116</div>
+                    <div class="grid-value">$194,564.74</div>
+                    <div class="grid-sub">Available balance</div>
+                </div>
+                <div class="grid-item">
+                    <i class="fas fa-credit-card grid-icon" style="color: #666;"></i>
+                    <div class="grid-title">Customized Cash Rewa...5399</div>
+                    <div class="grid-value">$8,784.21</div>
+                    <div class="grid-sub">Available Rewards</div>
+                </div>
+                <div class="grid-item">
+                    <i class="fas fa-chart-line grid-icon" style="color: #003087;"></i>
+                    <div class="grid-title">On Average You Spend</div>
+                    <div class="grid-value">$158,124</div>
+                    <div class="grid-sub">Less Than You Deposit</div>
+                </div>
+                <div class="grid-item">
+                    <i class="fas fa-tachometer-alt grid-icon" style="color: #003087;"></i>
+                    <div class="grid-title">My FICO® Score</div>
+                    <button class="grid-btn maintenance-alert" style="border: none; padding: 0; margin-top: 5px; color: #003087;">Enroll Now</button>
+                </div>
+                <div class="grid-item">
+                    <i class="fas fa-percentage grid-icon" style="color: #666;"></i>
+                    <div class="grid-title">BankAmeriDeals®</div>
+                    <div class="grid-value">10%</div>
+                    <div class="grid-sub">3 Days Left</div>
+                    <i class="fas fa-plus-circle maintenance-alert" style="color: #003087; margin-top: 5px; cursor: pointer;"></i>
+                </div>
+                <div class="grid-item">
+                    <i class="fas fa-bell grid-icon" style="color: #c41230;"></i>
+                    <div class="grid-title">Alerts</div>
+                    <button class="grid-btn maintenance-alert" style="border: none; padding: 0; margin-top: 5px; color: #003087;">Enroll now</button>
+                </div>
+                <div class="grid-item">
+                    <i class="fas fa-seedling grid-icon" style="color: #003087;"></i>
+                    <div class="grid-title">Better Money Habits®</div>
+                    <div class="grid-sub">Know your repayment options</div>
+                </div>
+                <div class="grid-item">
+                    <i class="fas fa-award grid-icon" style="color: #003087;"></i>
+                    <div class="grid-title">My Rewards</div>
+                    <div class="grid-value">$8,567.64</div>
+                    <div class="grid-sub">Total Reward Value</div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <div class="inbox-overlay" id="inboxModal">
+        <div class="inbox-content">
+            <div class="inbox-header">
+                <h3>Inbox</h3>
+                <i class="fas fa-times close-inbox" id="closeInbox"></i>
+            </div>
+            <div id="inboxList"></div>
+        </div>
+    </div>
+
+    <div class="bottom-nav">
+        <div class="nav-item active"><i class="fas fa-university nav-icon"></i>Accounts</div>
+        <div class="nav-item" onclick="window.location.href='pay.html'"><i class="fas fa-exchange-alt nav-icon"></i>Pay & Transfer</div>
+        <div class="nav-item" onclick="window.location.href='invest.html'"><i class="fas fa-chart-pie nav-icon"></i>Invest</div>
+    </div>
+
+</body>
+</html>
